@@ -11,3 +11,6 @@ jobs:
 
   security:
     uses: arek-devops-platform/platform-workflows/.github/workflows/security-scan.yml@main
+
+  docker:
+    uses: arek-devops-platform/platform-workflows/.github/workflows/docker-scan.yml@main
