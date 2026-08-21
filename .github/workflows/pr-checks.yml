@@ -8,3 +8,6 @@ on:
 jobs:
   test:
     uses: arek-devops-platform/platform-workflows/.github/workflows/python-test.yml@main
+
+  security:
+    uses: arek-devops-platform/platform-workflows/.github/workflows/security-scan.yml@main
