@@ -1,5 +1,5 @@
 # ---- Stage 1: build dependencies ----
-FROM python:3.12-slim AS builder
+FROM python:3.12-alpine AS builder
 
 WORKDIR /app
 
@@ -8,11 +8,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # ---- Stage 2: final runtime image ----
-FROM python:3.12-slim
+FROM python:3.12-alpine
+
+# Apply the latest Alpine security patches to the base OS packages
+RUN apk update && apk upgrade --no-cache
 
 # Create a dedicated non-root user/group to run the app
-RUN groupadd --gid 1000 appuser \
-    && useradd --uid 1000 --gid appuser --shell /bin/false --no-create-home appuser
+RUN addgroup -g 1000 appuser \
+    && adduser -D -H -u 1000 -G appuser -s /sbin/nologin appuser
 
 WORKDIR /app
 
