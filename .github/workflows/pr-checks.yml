@@ -1,0 +1,10 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    uses: arek-devops-platform/platform-workflows/.github/workflows/python-test.yml@main
