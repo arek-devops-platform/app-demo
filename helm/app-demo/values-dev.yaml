@@ -1,0 +1,20 @@
+# DEV environment overrides. Deploy with:
+#   helm upgrade --install app-demo helm/app-demo \
+#     -f helm/app-demo/values.yaml -f helm/app-demo/values-dev.yaml \
+#     --set image.tag=<git-sha> \
+#     -n dev
+#
+# Deliberately does NOT set image.tag - the image reference is supplied at
+# deploy time and is identical to whatever gets promoted to PROD later.
+
+replicaCount: 1
+
+env: dev
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

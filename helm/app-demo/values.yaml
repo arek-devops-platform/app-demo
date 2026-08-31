@@ -1,0 +1,42 @@
+# Base defaults shared by every environment. DEV and PROD each layer their
+# own values file on top of this one (values-dev.yaml / values-prod.yaml)
+# to override only what genuinely differs between environments.
+
+replicaCount: 1
+
+image:
+  repository: arekdevopsacr40031.azurecr.io/app-demo
+  # Overridden at deploy time with --set image.tag=<git-sha> - never edited
+  # here. This is what makes "Build Once, Promote Many" possible: the same
+  # image reference is reused unchanged for both DEV and PROD deploys.
+  tag: v1
+  pullPolicy: IfNotPresent
+
+# Used for both the container's port and the Service's targetPort, so the
+# two can never drift out of sync with each other.
+containerPort: 8000
+
+service:
+  type: ClusterIP
+  port: 80
+
+probes:
+  path: /health
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 20
+
+# A simple, visible marker of which environment this release is running as
+# (injected into the container as the APP_ENV environment variable).
+env: dev
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
