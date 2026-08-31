@@ -37,83 +37,84 @@ jobs:
       - name: Build Docker image (verification only, no push)
         run: docker build -t app-demo:pr-verify .
 
-  build-and-deploy:
-    name: "Push to main: Build, Push to ACR, Deploy to AKS"
+  build-and-push:
+    name: "Push to main: Build, Scan, Push to ACR"
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    # Only this job authenticates to Azure, so only this job gets the
-    # OIDC token permission - minted and used solely within this job run.
+    # Required at the CALLER too: a reusable workflow can never elevate
+    # permissions beyond what the calling job itself was granted, so
+    # id-token: write must be declared here as well as inside the
+    # reusable workflow's own job.
     permissions:
       contents: read
       id-token: write
-    env:
-      IMAGE: ${{ vars.ACR_NAME }}.azurecr.io/app-demo:${{ github.sha }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+    uses: arek-devops-platform/platform-workflows/.github/workflows/docker-build-push.yml@main
+    with:
+      acr-name: ${{ vars.ACR_NAME }}
+      image-name: app-demo
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
+  deploy-dev:
+    name: "Push to main: Deploy to DEV"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-push
+    permissions:
+      contents: read
+      id-token: write
+    uses: arek-devops-platform/platform-workflows/.github/workflows/helm-deploy.yml@main
+    with:
+      environment-name: dev
+      namespace: dev
+      chart-path: helm/app-demo
+      values-file: helm/app-demo/values-dev.yaml
+      image-repository: ${{ vars.ACR_NAME }}.azurecr.io/app-demo
+      image-tag: ${{ needs.build-and-push.outputs.image-tag }}
+      aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+      aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+  smoke-test:
+    name: "Push to main: Smoke Test DEV"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy-dev
+    permissions:
+      contents: read
+      id-token: write
+    uses: arek-devops-platform/platform-workflows/.github/workflows/smoke-test.yml@main
+    with:
+      namespace: dev
+      aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+      aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Run tests
-        run: pytest -v
-
-      - name: Azure login (OIDC, no client secret)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      # Uses the az CLI's current OIDC session to get a registry token -
-      # no ACR admin username/password, matching the AcrPush RBAC role
-      # already granted to this identity.
-      - name: Log in to ACR
-        run: az acr login --name ${{ vars.ACR_NAME }}
-
-      # Tagged with the commit SHA, never "latest" - every image is
-      # traceable back to the exact commit that produced it, and rolling
-      # back later just means deploying a previous SHA tag.
-      - name: Build Docker image
-        run: docker build -t ${{ env.IMAGE }} .
-
-      - name: Push Docker image to ACR
-        run: docker push ${{ env.IMAGE }}
-
-      # Cluster User Role (not Admin) - matches the RBAC role already
-      # granted to this identity.
-      - name: Get AKS credentials
-        run: |
-          az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
-            --overwrite-existing
-
-      - name: Deploy Service
-        run: kubectl apply -n ${{ vars.AKS_NAMESPACE }} -f k8s/service.yaml
-
-      # k8s/deployment.yaml on disk still says :v1 (left unchanged on
-      # purpose - it's the template, not a record of what's currently
-      # deployed). "kubectl set image --local" rewrites the image field
-      # in memory only and prints the resulting YAML; nothing is sent to
-      # the cluster until that output is piped into "kubectl apply -f -".
-      # This means the Deployment is created/updated with the SHA-tagged
-      # image directly - it is never briefly rolled back to :v1 first.
-      - name: Deploy Deployment with the SHA-tagged image
-        run: |
-          kubectl set image -f k8s/deployment.yaml app-demo=${{ env.IMAGE }} --local -o yaml \
-            | kubectl apply -n ${{ vars.AKS_NAMESPACE }} -f -
-
-      - name: Wait for rollout to finish
-        run: |
-          kubectl rollout status deployment/app-demo \
-            -n ${{ vars.AKS_NAMESPACE }} \
-            --timeout=120s
-
-      - name: Show pods after deployment
-        run: kubectl get pods -n ${{ vars.AKS_NAMESPACE }} -o wide
+  deploy-prod:
+    name: "Push to main: Deploy to PROD"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # build-and-push must be listed explicitly (not just smoke-test) -
+    # its output is only readable here because it's named in this list,
+    # regardless of it already having finished transitively.
+    needs: [smoke-test, build-and-push]
+    permissions:
+      contents: read
+      id-token: write
+    uses: arek-devops-platform/platform-workflows/.github/workflows/helm-deploy.yml@main
+    with:
+      environment-name: prod
+      namespace: prod
+      chart-path: helm/app-demo
+      values-file: helm/app-demo/values-prod.yaml
+      image-repository: ${{ vars.ACR_NAME }}.azurecr.io/app-demo
+      # Same expression, same source job, as deploy-dev above - this is
+      # what makes Build Once, Promote Many an enforced property of the
+      # job graph rather than a hoped-for convention.
+      image-tag: ${{ needs.build-and-push.outputs.image-tag }}
+      aks-resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+      aks-cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
