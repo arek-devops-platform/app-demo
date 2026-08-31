@@ -1,0 +1,21 @@
+# PROD environment overrides. Deploy with:
+#   helm upgrade --install app-demo helm/app-demo \
+#     -f helm/app-demo/values.yaml -f helm/app-demo/values-prod.yaml \
+#     --set image.tag=<the-exact-same-git-sha-already-verified-in-dev> \
+#     -n prod
+#
+# Deliberately does NOT set image.tag - PROD must be promoted from the
+# exact same image SHA that was already built once and verified in DEV,
+# never a separate build. Only replicas and resources scale up here.
+
+replicaCount: 2
+
+env: prod
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
