@@ -1,0 +1,119 @@
+name: CI/CD - Build, Push, Deploy
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  pr-validate:
+    name: "Pull Request: Test & Verify Docker Build"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # This job never authenticates to Azure, so it gets no id-token - just
+    # enough to read the checked-out code.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -v
+
+      # Verifies the Dockerfile still builds successfully. Not pushed
+      # anywhere, and no Azure credentials are used or needed for this.
+      - name: Build Docker image (verification only, no push)
+        run: docker build -t app-demo:pr-verify .
+
+  build-and-deploy:
+    name: "Push to main: Build, Push to ACR, Deploy to AKS"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Only this job authenticates to Azure, so only this job gets the
+    # OIDC token permission - minted and used solely within this job run.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ vars.ACR_NAME }}.azurecr.io/app-demo:${{ github.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Azure login (OIDC, no client secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Uses the az CLI's current OIDC session to get a registry token -
+      # no ACR admin username/password, matching the AcrPush RBAC role
+      # already granted to this identity.
+      - name: Log in to ACR
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      # Tagged with the commit SHA, never "latest" - every image is
+      # traceable back to the exact commit that produced it, and rolling
+      # back later just means deploying a previous SHA tag.
+      - name: Build Docker image
+        run: docker build -t ${{ env.IMAGE }} .
+
+      - name: Push Docker image to ACR
+        run: docker push ${{ env.IMAGE }}
+
+      # Cluster User Role (not Admin) - matches the RBAC role already
+      # granted to this identity.
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Deploy Service
+        run: kubectl apply -n ${{ vars.AKS_NAMESPACE }} -f k8s/service.yaml
+
+      # k8s/deployment.yaml on disk still says :v1 (left unchanged on
+      # purpose - it's the template, not a record of what's currently
+      # deployed). "kubectl set image --local" rewrites the image field
+      # in memory only and prints the resulting YAML; nothing is sent to
+      # the cluster until that output is piped into "kubectl apply -f -".
+      # This means the Deployment is created/updated with the SHA-tagged
+      # image directly - it is never briefly rolled back to :v1 first.
+      - name: Deploy Deployment with the SHA-tagged image
+        run: |
+          kubectl set image -f k8s/deployment.yaml app-demo=${{ env.IMAGE }} --local -o yaml \
+            | kubectl apply -n ${{ vars.AKS_NAMESPACE }} -f -
+
+      - name: Wait for rollout to finish
+        run: |
+          kubectl rollout status deployment/app-demo \
+            -n ${{ vars.AKS_NAMESPACE }} \
+            --timeout=120s
+
+      - name: Show pods after deployment
+        run: kubectl get pods -n ${{ vars.AKS_NAMESPACE }} -o wide
